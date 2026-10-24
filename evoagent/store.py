@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
 
+_UNSET = object()
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -480,12 +482,13 @@ class TaskStore:
                 ).fetchall()
         return [dict(item) for item in rows]
 
-    def record_failure_case(self, task_id: str, category: str, payload: Dict[str, Any]) -> None:
+    def record_failure_case(self, task_id: str, category: str, payload: Dict[str, Any]) -> int:
         with self._lock, self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO failure_cases(task_id, category, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (task_id, category, json.dumps(payload, ensure_ascii=False), utc_now()),
             )
+            return int(cursor.lastrowid)
 
     def list_failure_cases(
         self, unresolved_only: bool = False, limit: int = 100,
@@ -534,6 +537,23 @@ class TaskStore:
             item["payload"] = json.loads(item.pop("payload_json"))
             values.append(item)
         return values
+
+    def get_failure_cases_by_ids(self, case_ids: list, tenant_id: str) -> list:
+        ids = [int(value) for value in case_ids]
+        if not ids:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT f.* FROM failure_cases f JOIN tasks t ON t.id=f.task_id "
+                "WHERE t.tenant_id=? AND f.id IN (%s)" % ",".join("?" for _ in ids),
+                [tenant_id] + ids,
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["payload"] = json.loads(value.pop("payload_json"))
+            result.append(value)
+        return result
 
     def resolve_failure_cases(self, case_ids: list) -> None:
         ids = [int(value) for value in case_ids]
@@ -638,13 +658,22 @@ class TaskStore:
             )
             return cursor.rowcount == 1
 
-    def save_skill_version(self, skill_name: str, prompt: str, score: float, activate: bool = False) -> Dict[str, Any]:
+    def save_skill_version(self, skill_name: str, prompt: str, score: float,
+                           activate: bool = False, expected_active=_UNSET) -> Dict[str, Any]:
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = conn.execute(
+                "SELECT * FROM skill_versions WHERE skill_name=? AND active=1 "
+                "ORDER BY version DESC LIMIT 1", (skill_name,),
+            ).fetchone()
+            if expected_active is not _UNSET and (
+                int(parent["version"]) if parent else None
+            ) != expected_active:
+                raise RuntimeError("active Prompt changed during evolution")
             row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) AS version FROM skill_versions WHERE skill_name = ?", (skill_name,)
             ).fetchone()
             version = int(row["version"]) + 1
-            parent = self.get_active_skill_version(skill_name)
             if activate:
                 conn.execute("UPDATE skill_versions SET active = 0 WHERE skill_name = ?", (skill_name,))
             conn.execute(

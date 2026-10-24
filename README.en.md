@@ -2,7 +2,7 @@
   <img src="docs/images/logo.svg" width="96" height="96" alt="Project logo">
 </p>
 
-<h1 align="center">Self-Evolving Multi-Agent PR Risk Review &amp; Repair</h1>
+<h1 align="center">ReviewLoop · Self-Evolving Multi-Agent Code Review</h1>
 
 <p align="center"><strong>Evidence-backed reviews · Verified fix suggestions · Feedback-driven improvement</strong></p>
 
@@ -76,6 +76,10 @@ Two types of artifacts have their own evolution paths:
 **Memory retrieval and version evolution are separate mechanisms.** Memory brings relevant experience into a task; evolution evaluates a candidate before activating a version. The evolution process does not directly rewrite production Python source.
 
 Missing prerequisites yield `deferred`; failed gates yield `rejected`. Passing candidates may activate, while review policies also support `shadow_ready` pending shadow verification. Versions and rollback remain available.
+
+### Confirmed missed-issue triggers
+
+After a `missed_issue` report, a manager confirms its rule ID and location. Confirmed cases are grouped by tenant, repository, and rule; multiple reports from one PR count once. Five unused, independent cases can automatically queue a Prompt evolution job, while a manager can start one earlier. Both paths use the same durable job queue, baseline checks, validation and holdout replay, and `shadow_ready` review gate. No candidate is automatically deployed. Configure the model, evaluation cases, and `EVOAGENT_EVOLUTION_TARGET_REPOSITORY`; then set `EVOAGENT_EVOLUTION_AUTO_ENABLED=true` to enable threshold triggering. The automatic mode is off by default. See `.env.example` for the threshold, scan, batch, and cooldown settings.
 
 > This describes an implemented evaluation workflow, not proven accuracy gains on real PRs. Deterministic offline proofs and real-model experiments should be interpreted separately. Repository-disjoint splits must be established when preparing evaluation data.
 

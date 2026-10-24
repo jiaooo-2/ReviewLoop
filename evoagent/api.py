@@ -21,6 +21,10 @@ TASK = re.compile(r"^/v1/tasks/([0-9a-f-]+)$")
 REPORT = re.compile(r"^/v1/tasks/([0-9a-f-]+)/report$")
 FIX = re.compile(r"^/v1/tasks/([0-9a-f-]+)/fix$")
 FEEDBACK = re.compile(r"^/v1/tasks/([0-9a-f-]+)/feedback$")
+EVOLUTION_JOB = re.compile(r"^/v1/evolution/jobs/([0-9a-f-]+)$")
+EVOLUTION_DISMISS = re.compile(r"^/v1/evolution/jobs/([0-9a-f-]+)/dismiss$")
+EVOLUTION_RETRY = re.compile(r"^/v1/evolution/jobs/([0-9a-f-]+)/retry$")
+EVOLUTION_CONFIRM = re.compile(r"^/v1/evolution/feedback/(\d+)/confirmation$")
 CANCEL = re.compile(r"^/v1/tasks/([0-9a-f-]+)/cancel$")
 RESUME = re.compile(r"^/v1/tasks/([0-9a-f-]+)/resume$")
 ROLLBACK = re.compile(r"^/v1/skills/([A-Za-z0-9_-]+)/versions/(\d+)/activate$")
@@ -34,7 +38,7 @@ WEB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
 class ApiHandler(BaseHTTPRequestHandler):
     service: ReviewService
     settings: Settings
-    server_version = "EvoAgent/0.3"
+    server_version = "ReviewLoop/0.4"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print("%s - %s" % (self.address_string(), fmt % args))
@@ -226,6 +230,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             status["provider"] = self.service.llm_config.get("provider", "local")
             status["model"] = self.service.llm_config.get("model", "")
             self._send_json(200, status)
+            return
+        if path == "/v1/evolution/trigger-status":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, self.service.evolution_triggers.status(principal.tenant_id))
+            return
+        if path == "/v1/evolution/feedback":
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            self._send_json(200, {"cases": self.service.evolution_triggers.db.feedback(principal.tenant_id)})
+            return
+        match = EVOLUTION_JOB.match(path)
+        if match:
+            if not principal.can("manage"):
+                self._send_json(403, {"error": "permission denied"})
+                return
+            job = self.service.evolution_triggers.db.get(match.group(1), principal.tenant_id)
+            self._send_json(200 if job else 404, job or {"error": "job not found"})
             return
         if path == "/v1/skill-evolution/status":
             if not principal.can("manage"):
@@ -423,6 +447,49 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(201, result)
                 return
+            match = EVOLUTION_CONFIRM.match(path)
+            if match:
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                result = self.service.evolution_triggers.confirm(
+                    int(match.group(1)), principal.tenant_id, principal.username,
+                    bool(payload.get("approve", True)),
+                )
+                self.service.store.audit(principal.tenant_id, principal.username,
+                    "evolution.feedback.confirm", match.group(1), result)
+                self._send_json(200, result)
+                return
+            match = EVOLUTION_DISMISS.match(path)
+            if match:
+                principal = self._principal("manage")
+                ok = self.service.evolution_triggers.db.dismiss(match.group(1), principal.tenant_id)
+                if ok:
+                    self.service.evolution_triggers._wake.set()
+                self.service.store.audit(principal.tenant_id, principal.username,
+                    "evolution.candidate.dismiss", match.group(1), {"dismissed": ok})
+                self._send_json(200 if ok else 404, {"dismissed": ok})
+                return
+            match = EVOLUTION_RETRY.match(path)
+            if match:
+                principal = self._principal("manage")
+                job = self.service.evolution_triggers.retry(match.group(1), principal.tenant_id)
+                self.service.store.audit(principal.tenant_id, principal.username,
+                    "evolution.job.retry", job["id"], {"status": job["status"]})
+                self._send_json(202, job)
+                return
+            if path == "/v1/evolution/triggers":
+                principal = self._principal("manage")
+                payload = self._read_json(body)
+                job = self.service.evolution_triggers.request(
+                    principal.tenant_id, str(payload.get("repository") or ""),
+                    str(payload.get("rule_id") or ""), payload.get("case_ids"),
+                    str(payload.get("idempotency_key") or "") or None,
+                )
+                self.service.store.audit(principal.tenant_id, principal.username,
+                    "evolution.trigger.manual", job["id"],
+                    {"repository": job["repository"], "rule_id": job["rule_id"]})
+                self._send_json(202, job)
+                return
             match = CANCEL.match(path)
             if match:
                 principal = self._principal("review")
@@ -480,6 +547,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/evolution/auto":
                 principal = self._principal("manage")
+                if self.service.evolution_triggers.db.active():
+                    raise RuntimeError("an evolution candidate is already in progress")
                 payload = self._read_json(body)
                 result = self.service.evolution.auto_propose(
                     str(payload.get("skill_name", "llm-review")), principal.tenant_id
@@ -490,6 +559,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/evolution/propose":
                 self._principal("manage")
+                if self.service.evolution_triggers.db.active():
+                    raise RuntimeError("an evolution candidate is already in progress")
                 payload = self._read_json(body)
                 result = self.service.evolution.propose(
                     str(payload.get("skill_name", "")), str(payload.get("prompt", "")),
@@ -554,6 +625,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             match = ROLLBACK.match(path)
             if match:
                 self._principal("manage")
+                if self.service.evolution_triggers.db.active():
+                    raise RuntimeError("dismiss the pending evolution candidate before activation")
                 ok = self.service.evolution.rollback(match.group(1), int(match.group(2)))
                 if ok:
                     self.service.reload_skills()
@@ -564,6 +637,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
         except PermissionError as exc:
             self._send_json(403, {"error": str(exc)})
+        except RuntimeError as exc:
+            self._send_json(409, {"error": str(exc)})
         except Exception as exc:
             metrics.inc("http_errors_total")
             self._send_json(500, {"error": "operation failed", "detail": str(exc)})
@@ -583,5 +658,6 @@ def run() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        service.evolution_triggers.close()
         service.queue.close()
         server.server_close()

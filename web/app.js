@@ -100,7 +100,7 @@ function show(view, updateHash = true) {
   });
   $(`#view-${view}`).classList.add("active");
   $("#page-title").textContent = titles[view];
-  document.title = `${titles[view]} · EvoAgent`;
+  document.title = `${titles[view]} · ReviewLoop`;
   if (updateHash) history.replaceState(null, "", `#${view}`);
 
   if (view === "tasks") loadTasks();
@@ -330,12 +330,25 @@ async function loadSkills() {
 
 async function loadFailures() {
   try {
-    const [failuresData, status, runsData] = await Promise.all([
+    const [failuresData, status, runsData, trigger, feedbackData] = await Promise.all([
       api("/api/failures"),
       api("/v1/evolution/status"),
       api("/v1/evolution/runs?limit=5"),
+      api("/v1/evolution/trigger-status"),
+      api("/v1/evolution/feedback"),
     ]);
     $("#evolution-status").textContent = formatJson(status);
+    const feedbackState = new Map((feedbackData.cases || []).map((item) => [item.failure_case_id, item]));
+    const groups = trigger.groups || [];
+    $("#trigger-status").textContent = trigger.waiting_reason ||
+      (groups.length ? groups.map((item) => `${item.rule_id}: ${item.eligible}/${trigger.threshold}`).join(" · ") :
+        `自动触发已就绪；每类需要 ${trigger.threshold} 个已确认的独立变更`);
+    const dismiss = $("#dismiss-evolution");
+    dismiss.hidden = trigger.active_job?.status !== "shadow_ready";
+    dismiss.dataset.jobId = trigger.active_job?.id || "";
+    $("#manual-evolve-rule").innerHTML = groups.length
+      ? groups.map((item) => `<option value="${escapeHtml(item.rule_id)}">${escapeHtml(item.rule_id)} (${item.eligible} 个待用)</option>`).join("")
+      : '<option value="">请先确认漏报案例</option>';
     const cases = failuresData.cases || [];
     const runs = runsData.runs || [];
     const failureHtml = cases.length
@@ -345,7 +358,11 @@ async function loadFailures() {
               <span class="task-name">${escapeHtml(feedbackLabels[item.category] || item.category)}</span>
               <span class="task-meta"><span>${escapeHtml(item.task_id)}</span><span>${escapeHtml((item.payload || {}).note || "无说明")}</span></span>
             </span></span>
-            <span class="status ${item.resolved ? "state-success" : "state-pending"}">${item.resolved ? "已解决" : "待处理"}</span>
+            <span class="status ${item.resolved ? "state-success" : "state-pending"}">${item.resolved ? "已解决" :
+              feedbackState.get(item.id)?.status === "pending" ? "待确认" :
+              feedbackState.get(item.id)?.status === "confirmed" ? "已确认" : "待处理"}</span>
+            ${feedbackState.get(item.id)?.status === "pending" ?
+              `<button class="button secondary confirm-evolution-feedback" data-case-id="${item.id}">确认漏报</button>` : ""}
           </div>`).join("")
       : '<div class="empty-state"><span><b>暂无失败反馈</b>系统当前没有未处理案例</span></div>';
     const historyHtml = runs.length
@@ -507,22 +524,57 @@ $("#evolution-form").addEventListener("submit", async (event) => {
 
 $("#auto-evolve").addEventListener("click", async () => {
   const button = $("#auto-evolve");
-  setButtonBusy(button, true, "正在生成…");
+  const ruleId = $("#manual-evolve-rule").value;
+  if (!ruleId) { toast("请先确认至少一条带规则编号的漏报"); return; }
+  setButtonBusy(button, true, "正在提交…");
   try {
-    const data = await api("/v1/evolution/auto", {
+    const trigger = await api("/v1/evolution/trigger-status");
+    const data = await api("/v1/evolution/triggers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ skill_name: "llm-review" }),
+      body: JSON.stringify({ repository: trigger.target_repository, rule_id: ruleId }),
     });
     $("#evolution-result").classList.remove("empty");
     $("#evolution-result").textContent = formatJson(data);
-    toast("反馈候选评测已完成");
+    toast("进化任务已提交");
+    const jobId = data.id;
+    const poll = setInterval(async () => {
+      try {
+        const job = await api(`/v1/evolution/jobs/${encodeURIComponent(jobId)}`);
+        $("#evolution-result").textContent = formatJson(job);
+        if (!["pending", "running"].includes(job.status)) { clearInterval(poll); loadFailures(); }
+      } catch (_) { clearInterval(poll); }
+    }, 3000);
     loadFailures();
   } catch (error) {
     toast(error.message);
   } finally {
     setButtonBusy(button, false);
   }
+});
+
+$("#dismiss-evolution").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!button.dataset.jobId) return;
+  setButtonBusy(button, true, "正在释放…");
+  try {
+    await api(`/v1/evolution/jobs/${encodeURIComponent(button.dataset.jobId)}/dismiss`, { method: "POST" });
+    await loadFailures();
+  } catch (error) { toast(error.message); }
+  finally { setButtonBusy(button, false); }
+});
+
+$("#failure-list").addEventListener("click", async (event) => {
+  const button = event.target.closest(".confirm-evolution-feedback");
+  if (!button) return;
+  setButtonBusy(button, true, "确认中…");
+  try {
+    await api(`/v1/evolution/feedback/${button.dataset.caseId}/confirmation`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: true }),
+    });
+    await loadFailures();
+  } catch (error) { toast(error.message); setButtonBusy(button, false); }
 });
 
 $("#refresh").addEventListener("click", async () => {

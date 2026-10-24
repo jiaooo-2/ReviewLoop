@@ -2,7 +2,7 @@
   <img src="docs/images/logo.svg" width="96" height="96" alt="项目图标">
 </p>
 
-<h1 align="center">自进化多智能体 PR 风险审查与修复系统</h1>
+<h1 align="center">ReviewLoop · 自进化多智能体代码审查系统</h1>
 
 <p align="center"><strong>有依据的审查 · 经验证的修复建议 · 由反馈驱动的改进</strong></p>
 
@@ -78,6 +78,12 @@
 **记忆检索与版本演化是两条机制**：前者把相关经验带入任务上下文，后者生成候选并经过评测后更新版本。演化过程不直接改写项目的生产 Python 源码。
 
 候选未满足模型或样本等条件时为 `deferred`；门禁不通过时为 `rejected`。通过门禁后可激活，审查策略也支持等待影子验证的 `shadow_ready` 状态。保留版本与回滚入口。
+
+### 确认漏报后的双触发
+
+对审查任务提交 `missed_issue` 反馈后，管理者需确认其规则编号、文件路径和新增行位置。系统按租户、仓库、规则编号归类，并把同一 PR（没有 PR 时为相同 diff）只计为一个独立案例。确认且尚未使用的同类案例达到 **5 个**时，可自动创建进化任务；也可在不足 5 个时手动发起。两种模式共用任务队列、去重、版本基线检查和独立验证集 / 保留集门禁。通过评测的 Prompt 候选进入 `shadow_ready`，需人工处理后才可激活；它不会直接修改生产源码或自动上线。
+
+自动触发默认关闭。先配置模型、独立评测案例及 `EVOAGENT_EVOLUTION_TARGET_REPOSITORY`，再设置 `EVOAGENT_EVOLUTION_AUTO_ENABLED=true`。`EVOAGENT_EVOLUTION_AUTO_THRESHOLD` 默认是 `5`，`EVOAGENT_EVOLUTION_TARGET_TENANT` 默认是 `default`；扫描间隔、每批上限和冷却时间可在 `.env.example` 中查看。控制台的“确认漏报”“手动发起进化”和“释放当前候选”分别对应确认、手动触发和解除候选占位；任务结果可按 job ID 查询。释放候选不会激活它，激活仍需走现有版本入口。自动触发只面向一个明确配置的目标仓库，避免把不同仓库的反馈混合训练。
 
 > 这里描述的是代码实现的改进流程，不代表已经在真实 PR 上证明准确率提升。离线确定性演化证明与真实模型实验需要分开解读；按仓库隔离的数据集划分也需要在准备评测数据时落实。
 
@@ -178,6 +184,11 @@ $task | ConvertTo-Json -Depth 10
 | `POST /v1/tasks/{id}/fix` | 请求修复 |
 | `POST /v1/tasks/{id}/feedback` | 提交反馈 |
 | `POST /v1/evolution/auto` | 生成并评测策略候选 |
+| `GET /v1/evolution/trigger-status` | 查看触发就绪状态及同类案例计数 |
+| `POST /v1/evolution/feedback/{id}/confirmation` | 人工确认或拒绝漏报 |
+| `POST /v1/evolution/triggers` | 手动创建 Prompt 进化任务 |
+| `GET /v1/evolution/jobs/{id}` | 查看任务、评测决定与结果 |
+| `POST /v1/evolution/jobs/{id}/dismiss` | 释放影子候选的任务占位 |
 | `GET /v1/evolution/runs` | 查看策略评测记录 |
 | `POST /v1/skill-evolution/auto` | 生成并评测 Skill 候选 |
 | `GET /v1/skill-evolution/runs` | 查看 Skill 评测记录 |

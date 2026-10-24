@@ -132,6 +132,13 @@ class Settings:
     evaluation_min_public_prs: int = 300
     evaluation_min_f1_improvement: float = 0.03
     evaluation_min_high_risk_improvement: float = 0.05
+    evolution_auto_enabled: bool = False
+    evolution_auto_threshold: int = 5
+    evolution_target_tenant: str = "default"
+    evolution_target_repository: str = ""
+    evolution_scan_interval_seconds: int = 60
+    evolution_batch_max_cases: int = 20
+    evolution_auto_cooldown_seconds: int = 86400
 
     def resolved_llm(self) -> Dict[str, object]:
         """Resolve a named provider to the existing OpenAI-compatible transport."""
@@ -224,6 +231,10 @@ class Settings:
             raise ValueError("LLM token prices cannot be negative")
         if self.evaluation_min_public_prs < 300:
             raise ValueError("EVOAGENT_EVALUATION_MIN_PUBLIC_PRS must be at least 300")
+        if self.evolution_auto_threshold > self.evolution_batch_max_cases:
+            raise ValueError("evolution threshold cannot exceed batch maximum")
+        if self.evolution_auto_enabled and not self.evolution_target_repository:
+            raise ValueError("automatic evolution requires a target repository")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -265,6 +276,14 @@ class Settings:
             eval_max_metric_regression=float(
                 os.getenv("EVOAGENT_EVAL_MAX_METRIC_REGRESSION", "0")
             ),
+            evolution_auto_enabled=_bool("EVOAGENT_EVOLUTION_AUTO_ENABLED"),
+            evolution_auto_threshold=_int("EVOAGENT_EVOLUTION_AUTO_THRESHOLD", 5),
+            evolution_target_tenant=os.getenv("EVOAGENT_EVOLUTION_TARGET_TENANT", "default"),
+            evolution_target_repository=os.getenv("EVOAGENT_EVOLUTION_TARGET_REPOSITORY", ""),
+            evolution_scan_interval_seconds=_int("EVOAGENT_EVOLUTION_SCAN_INTERVAL_SECONDS", 60),
+            evolution_batch_max_cases=_int("EVOAGENT_EVOLUTION_BATCH_MAX_CASES", 20),
+            evolution_auto_cooldown_seconds=_non_negative_int(
+                "EVOAGENT_EVOLUTION_AUTO_COOLDOWN_SECONDS", 86400),
             auth_required=_bool("EVOAGENT_AUTH_REQUIRED", False),
             auth_secret=os.getenv("EVOAGENT_AUTH_SECRET", ""),
             bootstrap_admin_username=os.getenv("EVOAGENT_BOOTSTRAP_ADMIN_USERNAME", ""),

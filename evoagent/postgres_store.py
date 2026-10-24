@@ -9,7 +9,7 @@ import json
 from typing import Any, Dict, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
-from .store import utc_now
+from .store import _UNSET, utc_now
 
 
 class PostgresTaskStore:
@@ -301,12 +301,14 @@ class PostgresTaskStore:
             value["updated_at"] = value["updated_at"].isoformat()
         return values
 
-    def record_failure_case(self, task_id: str, category: str, payload: Dict[str, Any]) -> None:
+    def record_failure_case(self, task_id: str, category: str, payload: Dict[str, Any]) -> int:
         with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO failure_cases(task_id,category,payload_json,created_at) VALUES (%s,%s,%s::jsonb,%s)",
+            row = conn.execute(
+                "INSERT INTO failure_cases(task_id,category,payload_json,created_at) "
+                "VALUES (%s,%s,%s::jsonb,%s) RETURNING id",
                 (task_id, category, json.dumps(payload, ensure_ascii=False), utc_now()),
-            )
+            ).fetchone()
+            return int(row["id"])
 
     def list_failure_cases(
         self, unresolved_only: bool = False, limit: int = 100,
@@ -363,6 +365,23 @@ class PostgresTaskStore:
             return
         with self._connect() as conn:
             conn.execute("UPDATE failure_cases SET resolved=TRUE WHERE id=ANY(%s)", (ids,))
+
+    def get_failure_cases_by_ids(self, case_ids: list, tenant_id: str) -> list:
+        ids = [int(value) for value in case_ids]
+        if not ids:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT f.* FROM failure_cases f JOIN tasks t ON t.id=f.task_id "
+                "WHERE t.tenant_id=%s AND f.id=ANY(%s)", (tenant_id, ids),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["payload"] = value.pop("payload_json")
+            value["created_at"] = value["created_at"].isoformat()
+            result.append(value)
+        return result
 
     def save_evaluation_case(
         self, name: str, split: str, diff: str, expected: list,
@@ -456,10 +475,18 @@ class PostgresTaskStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def save_skill_version(self, skill_name: str, prompt: str, score: float, activate: bool = False) -> Dict[str, Any]:
-        active = self.get_active_skill_version(skill_name)
+    def save_skill_version(self, skill_name: str, prompt: str, score: float,
+                           activate: bool = False, expected_active=_UNSET) -> Dict[str, Any]:
         with self._connect() as conn:
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (skill_name,))
+            active = conn.execute(
+                "SELECT version FROM skill_versions WHERE skill_name=%s AND active=TRUE "
+                "ORDER BY version DESC LIMIT 1", (skill_name,),
+            ).fetchone()
+            if expected_active is not _UNSET and (
+                int(active["version"]) if active else None
+            ) != expected_active:
+                raise RuntimeError("active Prompt changed during evolution")
             row = conn.execute(
                 "SELECT COALESCE(MAX(version),0) AS version FROM skill_versions WHERE skill_name=%s",
                 (skill_name,),
