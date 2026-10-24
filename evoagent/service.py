@@ -27,6 +27,7 @@ from .skills import AgentSkill, SkillRegistry
 from .skill_evolution import AgentSkillReplayReviewer, SkillEvolutionEngine, validate_artifact
 from .store import utc_now
 from .task_queue import PermanentTaskError, TaskQueue
+from .evolution_triggers import EvolutionTriggers
 from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 
@@ -127,6 +128,7 @@ class ReviewService:
             settings.queue_max_attempts, settings.queue_lease_seconds,
             self._on_dead_letter,
         )
+        self.evolution_triggers = EvolutionTriggers(self)
 
     def _build_llm_reviewer(self, prompt: str = "") -> OpenAICompatibleReviewer:
         if not self.llm_config:
@@ -490,13 +492,17 @@ class ReviewService:
             raise ValueError("feedback requires a completed review task")
         if category not in {"false_positive", "missed_issue", "bad_fix", "accepted"}:
             raise ValueError("unsupported feedback category")
-        self.store.record_failure_case(task_id, category, {"finding": finding, "note": note[:2000]})
+        case_id = self.store.record_failure_case(task_id, category, {"finding": finding, "note": note[:2000]})
+        self.evolution_triggers.register_feedback(case_id, task, category, finding)
         self.memory.remember_feedback(
             task.get("tenant_id") or tenant_id or "default", task["repository"],
             task_id, category, finding, note[:2000],
         )
         metrics.inc("feedback_total")
-        return {"recorded": True, "category": category}
+        result = {"recorded": True, "category": category}
+        if category == "missed_issue":
+            result["case_id"] = case_id
+        return result
 
     def resume_task(self, task_id: str, tenant_id: Optional[str] = None) -> dict:
         task = self.store.get(task_id, tenant_id)

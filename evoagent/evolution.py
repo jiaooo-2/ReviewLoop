@@ -343,6 +343,7 @@ class EvolutionEngine:
     def _propose(
         self, skill_name: str, prompt: str, regression_score: Optional[float],
         activation_policy: str = "auto",
+        pre_save_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         safety = self.safety_evaluate(prompt)
         active = self.store.get_active_skill_version(skill_name)
@@ -431,8 +432,11 @@ class EvolutionEngine:
                     reasons.append("a protected holdout metric regressed")
                 reason = "; ".join(reasons)
 
+        if pre_save_check is not None:
+            pre_save_check()
         version = self.store.save_skill_version(
-            skill_name, prompt.strip(), candidate_metrics["score"], decision == "activated"
+            skill_name, prompt.strip(), candidate_metrics["score"],
+            decision == "activated", expected_active=active["version"] if active else None,
         )
         run = {
             "id": str(uuid.uuid4()),
@@ -483,8 +487,13 @@ class EvolutionEngine:
 
     def auto_propose(
         self, skill_name: str = "llm-review", tenant_id: Optional[str] = None,
+        failure_cases: Optional[List[dict]] = None,
+        pre_save_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        cases = self.store.list_failure_cases(True, 100, tenant_id)
+        cases = (
+            self.store.list_failure_cases(True, 100, tenant_id)
+            if failure_cases is None else list(failure_cases)
+        )
         active = self.store.get_active_skill_version(skill_name)
         base = active["prompt"] if active else DEFAULT_PROMPT
         if self.candidate_generator is not None and cases:
@@ -497,7 +506,8 @@ class EvolutionEngine:
                     "candidate_change": generated,
                     "failure_cases_used": len(cases), "run_id": None,
                 }
-            result = self._propose(skill_name, candidate, None, activation_policy="shadow")
+            result = self._propose(skill_name, candidate, None,
+                                   activation_policy="shadow", pre_save_check=pre_save_check)
             result["candidate_change"] = generated
             result["failure_cases_used"] = len(cases)
             result["rollback_point"] = (
