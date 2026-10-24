@@ -102,8 +102,8 @@
 使用 **Python 3.11**。多智能体审查需要配置模型；模型调用可能产生费用。下面以 PowerShell 与 DeepSeek 为例：
 
 ```powershell
-git clone https://github.com/jiaooo-2/self-evolving-multi-agent-pr-review.git
-cd self-evolving-multi-agent-pr-review
+git clone https://github.com/jiaooo-2/ReviewLoop.git
+cd ReviewLoop
 
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt

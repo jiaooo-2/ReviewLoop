@@ -98,8 +98,8 @@ Each `SKILL.md` defines scope, procedures, evidence standards and output require
 Use **Python 3.11**. Agentic reviews require a configured model and may incur provider charges. PowerShell example using DeepSeek:
 
 ```powershell
-git clone https://github.com/jiaooo-2/self-evolving-multi-agent-pr-review.git
-cd self-evolving-multi-agent-pr-review
+git clone https://github.com/jiaooo-2/ReviewLoop.git
+cd ReviewLoop
 
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
